@@ -1,0 +1,66 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# macOS files
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# Environment files
+*.env
+.env.*
+
+# Backend data
+Backend/xbrain/checkpoints/
+Backend/xbrain/faiss_index.index
+Backend/xbrain/checkpoints/faiss_meta.pkl
+Backend/xbrain/checkpoints/*.pth/
+Backend/xbrain/checkpoints/*.h5
+
+# Frontend artifacts
+Frontend/node_modules/
+Frontend/dist/
+Frontend/build/
+Frontend/.turbo/
+Frontend/.pnp/
+Frontend/.pnp.js
+
+# npm logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Coverage
+coverage/
+*.lcov
+
+# IDE files
+*.idea/
+*.sublime-project
+*.sublime-workspace

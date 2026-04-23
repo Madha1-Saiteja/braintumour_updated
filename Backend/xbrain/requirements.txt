@@ -1,0 +1,50 @@
+# X-Brain v2.0 — Requirements
+# Install: pip install -r requirements.txt
+
+# ── Web Framework ──────────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+pydantic>=2.0.0
+
+# ── Frontend ───────────────────────────────────────────────────────────────
+streamlit>=1.32.0
+
+# ── Deep Learning — Classification ────────────────────────────────────────
+tensorflow>=2.15.0
+keras>=2.15.0
+
+# ── Deep Learning — Segmentation ──────────────────────────────────────────
+torch>=2.0.0
+torchvision>=0.15.0
+monai>=1.3.0
+
+# ── Image Processing ───────────────────────────────────────────────────────
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# ── RAG Pipeline ──────────────────────────────────────────────────────────
+sentence-transformers>=2.7.0        # Embeddings (all-MiniLM-L6-v2)
+faiss-cpu>=1.8.0                    # Vector store (use faiss-gpu for GPU)
+pypdf>=4.0.0                        # PDF ingestion
+
+# ── LLM (free, fast) ──────────────────────────────────────────────────────
+groq>=0.9.0                         # Groq API — LLaMA 3 70B (free tier)
+# Alternatively: openai>=1.0.0      # OpenAI GPT-4o (paid)
+
+# ── Multi-language Translation ────────────────────────────────────────────
+deep-translator>=1.11.0             # Google Translate (free, no key needed)
+
+# ── Utilities ─────────────────────────────────────────────────────────────
+requests>=2.31.0
+httpx>=0.26.0
+python-dotenv>=1.0.0
+tqdm>=4.66.0
+
+# ── Deep Learning — Segmentation ──────────────────────────────────────────
+torch>=2.0.0
+torchvision>=0.15.0
+monai>=1.3.0
+einops>=0.7.0        # required by SwinUNETR
+opencv-python==4.9.0.80
