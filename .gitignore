@@ -27,11 +27,7 @@ env/
 .env.*
 
 # Backend data
-Backend/xbrain/checkpoints/
-Backend/xbrain/faiss_index.index
-Backend/xbrain/checkpoints/faiss_meta.pkl
-Backend/xbrain/checkpoints/*.pth/
-Backend/xbrain/checkpoints/*.h5
+# (checkpoint and docs directories are now tracked for deployment)
 
 # Frontend artifacts
 Frontend/node_modules/
