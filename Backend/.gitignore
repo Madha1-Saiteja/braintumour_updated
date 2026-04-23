@@ -1,10 +1,2 @@
-checkpoints/
-*.h5
-*.pth
-*.index
-*.pkl
-*.zip
-medical_docs/
-.env
 venv/
 __pycache__/
