@@ -62,6 +62,42 @@ EAGER_LOAD_MODELS = _env_flag("EAGER_LOAD_MODELS", False)
 BUILD_RAG_INDEX_ON_STARTUP = _env_flag("BUILD_RAG_INDEX_ON_STARTUP", False)
 
 
+def _resolve_existing_path(configured_path: Path, pattern: str) -> Path:
+    if configured_path.exists():
+        return configured_path
+
+    search_dirs = [
+        ROOT / "checkpoints",
+        ROOT.parent / "xbrain" / "checkpoints",
+        ROOT.parent / "Backend" / "xbrain" / "checkpoints",
+        Path.cwd() / "checkpoints",
+        Path.cwd() / "xbrain" / "checkpoints",
+        Path.cwd() / "Backend" / "xbrain" / "checkpoints",
+    ]
+
+    seen = set()
+    for directory in search_dirs:
+        directory_key = str(directory.resolve()) if directory.exists() else str(directory)
+        if directory_key in seen:
+            continue
+        seen.add(directory_key)
+
+        if not directory.exists():
+            continue
+
+        matches = sorted(directory.glob(pattern))
+        if matches:
+            resolved = matches[0]
+            log.warning(
+                "Configured artifact path missing: %s. Using fallback: %s",
+                configured_path,
+                resolved,
+            )
+            return resolved
+
+    return configured_path
+
+
 def _get_classifier_module():
     global _classifier_module
     if _classifier_module is None:
@@ -88,38 +124,42 @@ def _rag_index_exists() -> bool:
 
 
 def _ensure_classifier_loaded():
+    weights_path = _resolve_existing_path(CLF_WEIGHTS, "*.weights.h5")
+
     if not ENABLE_CLASSIFIER:
         raise HTTPException(status_code=503, detail="Classifier is disabled by configuration.")
 
     if "classifier" in MODELS:
         return MODELS["classifier"]
 
-    if not CLF_WEIGHTS.exists():
+    if not weights_path.exists():
         raise HTTPException(
-            status_code=503, detail=f"Classification weights not found: {CLF_WEIGHTS}"
+            status_code=503, detail=f"Classification weights not found: {weights_path}"
         )
 
     log.info("Loading classifier on demand")
     classifier_module = _get_classifier_module()
-    MODELS["classifier"] = classifier_module.build_classifier(str(CLF_WEIGHTS))
+    MODELS["classifier"] = classifier_module.build_classifier(str(weights_path))
     log.info("Classifier loaded")
     return MODELS["classifier"]
 
 
 def _ensure_segmentor_loaded():
+    weights_path = _resolve_existing_path(SEG_WEIGHTS, "*.pth")
+
     if not ENABLE_SEGMENTOR:
         return None, None
 
     if "segmentor" in MODELS and "device" in MODELS:
         return MODELS["segmentor"], MODELS["device"]
 
-    if not SEG_WEIGHTS.exists():
-        log.warning("Segmentation weights not found: %s", SEG_WEIGHTS)
+    if not weights_path.exists():
+        log.warning("Segmentation weights not found: %s", weights_path)
         return None, None
 
     log.info("Loading segmentor on demand")
     segmentor_module = _get_segmentor_module()
-    model_seg, device = segmentor_module.build_segmentor(str(SEG_WEIGHTS))
+    model_seg, device = segmentor_module.build_segmentor(str(weights_path))
     MODELS["segmentor"] = model_seg
     MODELS["device"] = device
     log.info("Segmentor loaded")
