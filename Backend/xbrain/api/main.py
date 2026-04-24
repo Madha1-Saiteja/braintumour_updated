@@ -62,9 +62,22 @@ EAGER_LOAD_MODELS = _env_flag("EAGER_LOAD_MODELS", False)
 BUILD_RAG_INDEX_ON_STARTUP = _env_flag("BUILD_RAG_INDEX_ON_STARTUP", False)
 
 
-def _resolve_existing_path(configured_path: Path, pattern: str) -> Path:
+def _resolve_existing_path(configured_path: Path, *patterns: str) -> Path:
     if configured_path.exists():
         return configured_path
+
+    search_patterns = [pattern for pattern in patterns if pattern]
+    if configured_path.name:
+        search_patterns.insert(0, configured_path.name)
+
+    # Handle legacy checkpoint names that may still be present in Render env vars.
+    legacy_aliases = {
+        "efficientnet_b0.h5": "EfficientNetB0_BrainTumor_full.weights.h5",
+        "best_model.h5": "EfficientNetB0_BrainTumor_full.weights.h5",
+    }
+    alias = legacy_aliases.get(configured_path.name.lower())
+    if alias:
+        search_patterns.insert(0, alias)
 
     search_dirs = [
         ROOT / "checkpoints",
@@ -85,15 +98,16 @@ def _resolve_existing_path(configured_path: Path, pattern: str) -> Path:
         if not directory.exists():
             continue
 
-        matches = sorted(directory.glob(pattern))
-        if matches:
-            resolved = matches[0]
-            log.warning(
-                "Configured artifact path missing: %s. Using fallback: %s",
-                configured_path,
-                resolved,
-            )
-            return resolved
+        for pattern in search_patterns:
+            matches = sorted(directory.glob(pattern))
+            if matches:
+                resolved = matches[0]
+                log.warning(
+                    "Configured artifact path missing: %s. Using fallback: %s",
+                    configured_path,
+                    resolved,
+                )
+                return resolved
 
     return configured_path
 
@@ -124,7 +138,11 @@ def _rag_index_exists() -> bool:
 
 
 def _ensure_classifier_loaded():
-    weights_path = _resolve_existing_path(CLF_WEIGHTS, "*.weights.h5")
+    weights_path = _resolve_existing_path(
+        CLF_WEIGHTS,
+        "*.weights.h5",
+        "*.h5",
+    )
 
     if not ENABLE_CLASSIFIER:
         raise HTTPException(status_code=503, detail="Classifier is disabled by configuration.")
@@ -145,7 +163,10 @@ def _ensure_classifier_loaded():
 
 
 def _ensure_segmentor_loaded():
-    weights_path = _resolve_existing_path(SEG_WEIGHTS, "*.pth")
+    weights_path = _resolve_existing_path(
+        SEG_WEIGHTS,
+        "*.pth",
+    )
 
     if not ENABLE_SEGMENTOR:
         return None, None
