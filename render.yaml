@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: braintumour-updated-backend
+    runtime: python
+    rootDir: Backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn xbrain.api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.1
+      - key: EAGER_LOAD_MODELS
+        value: "false"
+      - key: ENABLE_SEGMENTOR
+        value: "false"
+      - key: ENABLE_RAG
+        value: "false"
