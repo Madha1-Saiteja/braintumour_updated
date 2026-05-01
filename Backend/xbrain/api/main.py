@@ -9,8 +9,10 @@ only when an endpoint actually needs them.
 
 import gc
 import importlib
+import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -62,6 +64,7 @@ ENABLE_RAG = _env_flag("ENABLE_RAG", False)
 EAGER_LOAD_MODELS = _env_flag("EAGER_LOAD_MODELS", False)
 BUILD_RAG_INDEX_ON_STARTUP = _env_flag("BUILD_RAG_INDEX_ON_STARTUP", False)
 UNLOAD_CLASSIFIER_AFTER_REQUEST = _env_flag("UNLOAD_CLASSIFIER_AFTER_REQUEST", True)
+USE_SUBPROCESS_INFERENCE = _env_flag("USE_SUBPROCESS_INFERENCE", True)
 
 
 def _resolve_existing_path(configured_path: Path, *patterns: str) -> Path:
@@ -180,6 +183,46 @@ def _ensure_segmentor_loaded():
     MODELS["device"] = device
     log.info("Segmentor loaded")
     return model_seg, device
+
+
+def _run_subprocess_inference(raw: bytes, language: str, patient_id: Optional[str]) -> dict:
+    clf_weights = _resolve_existing_path(CLF_WEIGHTS, "*.weights.h5", "*.h5")
+    seg_weights = _resolve_existing_path(SEG_WEIGHTS, "*.pth")
+
+    if not clf_weights.exists():
+        raise HTTPException(
+            status_code=503, detail=f"Classification weights not found: {clf_weights}"
+        )
+
+    cmd = [
+        sys.executable,
+        str(ROOT / "inference_worker.py"),
+        "--language",
+        language,
+        "--patient-id",
+        patient_id or "",
+        "--clf-weights",
+        str(clf_weights),
+    ]
+
+    if ENABLE_SEGMENTOR and seg_weights.exists():
+        cmd.extend(["--seg-weights", str(seg_weights)])
+
+    result = subprocess.run(
+        cmd,
+        input=raw,
+        capture_output=True,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="ignore").strip()
+        raise HTTPException(status_code=500, detail=stderr or "Inference worker failed.")
+
+    try:
+        return json.loads(result.stdout.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Inference worker returned invalid JSON.") from exc
 
 
 def _unload_classifier():
@@ -383,12 +426,23 @@ async def analyze(
     language: str = "en",
     patient_id: Optional[str] = None,
 ):
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file uploaded.")
+
+    if USE_SUBPROCESS_INFERENCE:
+        payload = _run_subprocess_inference(raw, language, patient_id)
+        return AnalysisResponse(
+            classification=ClassificationResult(**payload["classification"]),
+            segmentation=SegmentationResult(**payload["segmentation"]),
+            clinical_report=payload["clinical_report"],
+            rag_report=RAGResult(**payload["rag_report"]),
+            images=payload["images"],
+            inference_time_ms=payload["inference_time_ms"],
+        )
+
     try:
         classifier_model = _ensure_classifier_loaded()
-
-        raw = await file.read()
-        if not raw:
-            raise HTTPException(status_code=400, detail="Empty file uploaded.")
 
         try:
             img_rgb = read_image_from_bytes(raw)
