@@ -7,6 +7,7 @@ Render free instances. Heavy ML modules are imported and models are loaded
 only when an endpoint actually needs them.
 """
 
+import gc
 import importlib
 import logging
 import os
@@ -60,11 +61,25 @@ ENABLE_SEGMENTOR = _env_flag("ENABLE_SEGMENTOR", False)
 ENABLE_RAG = _env_flag("ENABLE_RAG", False)
 EAGER_LOAD_MODELS = _env_flag("EAGER_LOAD_MODELS", False)
 BUILD_RAG_INDEX_ON_STARTUP = _env_flag("BUILD_RAG_INDEX_ON_STARTUP", False)
+UNLOAD_CLASSIFIER_AFTER_REQUEST = _env_flag("UNLOAD_CLASSIFIER_AFTER_REQUEST", True)
 
 
-def _resolve_existing_path(configured_path: Path, pattern: str) -> Path:
+def _resolve_existing_path(configured_path: Path, *patterns: str) -> Path:
     if configured_path.exists():
         return configured_path
+
+    search_patterns = [pattern for pattern in patterns if pattern]
+    if configured_path.name:
+        search_patterns.insert(0, configured_path.name)
+
+    legacy_aliases = {
+        "efficientnet_b0.h5": "EfficientNetB0_BrainTumor_full.weights.h5",
+        "best_model.h5": "EfficientNetB0_BrainTumor_full.weights.h5",
+        "swin_unetr.pth": "SwinUNETR_Segmentation_best.pth",
+    }
+    alias = legacy_aliases.get(configured_path.name.lower())
+    if alias:
+        search_patterns.insert(0, alias)
 
     search_dirs = [
         ROOT / "checkpoints",
@@ -85,15 +100,16 @@ def _resolve_existing_path(configured_path: Path, pattern: str) -> Path:
         if not directory.exists():
             continue
 
-        matches = sorted(directory.glob(pattern))
-        if matches:
-            resolved = matches[0]
-            log.warning(
-                "Configured artifact path missing: %s. Using fallback: %s",
-                configured_path,
-                resolved,
-            )
-            return resolved
+        for pattern in search_patterns:
+            matches = sorted(directory.glob(pattern))
+            if matches:
+                resolved = matches[0]
+                log.warning(
+                    "Configured artifact path missing: %s. Using fallback: %s",
+                    configured_path,
+                    resolved,
+                )
+                return resolved
 
     return configured_path
 
@@ -124,7 +140,7 @@ def _rag_index_exists() -> bool:
 
 
 def _ensure_classifier_loaded():
-    weights_path = _resolve_existing_path(CLF_WEIGHTS, "*.weights.h5")
+    weights_path = _resolve_existing_path(CLF_WEIGHTS, "*.weights.h5", "*.h5")
 
     if not ENABLE_CLASSIFIER:
         raise HTTPException(status_code=503, detail="Classifier is disabled by configuration.")
@@ -164,6 +180,23 @@ def _ensure_segmentor_loaded():
     MODELS["device"] = device
     log.info("Segmentor loaded")
     return model_seg, device
+
+
+def _unload_classifier():
+    model = MODELS.pop("classifier", None)
+    if model is None:
+        return
+
+    log.info("Unloading classifier to reduce memory usage")
+    del model
+
+    try:
+        classifier_module = _get_classifier_module()
+        classifier_module.tf.keras.backend.clear_session()
+    except Exception as exc:
+        log.warning("Failed to clear TensorFlow session cleanly: %s", exc)
+
+    gc.collect()
 
 
 @asynccontextmanager
@@ -345,97 +378,108 @@ def translate(req: TranslateRequest):
 
 
 @app.post("/analyze", response_model=AnalysisResponse)
-async def analyze(file: UploadFile = File(...), language: str = "en"):
-    classifier_model = _ensure_classifier_loaded()
-
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Empty file uploaded.")
-
+async def analyze(
+    file: UploadFile = File(...),
+    language: str = "en",
+    patient_id: Optional[str] = None,
+):
     try:
-        img_rgb = read_image_from_bytes(raw)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not decode image: {exc}") from exc
+        classifier_model = _ensure_classifier_loaded()
 
-    t0 = time.time()
+        raw = await file.read()
+        if not raw:
+            raise HTTPException(status_code=400, detail="Empty file uploaded.")
 
-    classifier_module = _get_classifier_module()
-    clf_result = classifier_module.classify(classifier_model, img_rgb)
-    log.info("Classification: %s (%.2f%%)", clf_result["class_name"], clf_result["confidence"] * 100)
+        try:
+            img_rgb = read_image_from_bytes(raw)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not decode image: {exc}") from exc
 
-    heatmap_rgb, gradcam_overlay = classifier_module.get_gradcam_overlay(
-        classifier_model,
-        img_rgb,
-        pred_index=clf_result["class_idx"],
-    )
+        t0 = time.time()
 
-    segmentor_model, segmentor_device = _ensure_segmentor_loaded()
-    skipped = not clf_result["has_tumor"] or segmentor_model is None
+        classifier_module = _get_classifier_module()
+        clf_result = classifier_module.classify(classifier_model, img_rgb)
+        log.info("Classification: %s (%.2f%%)", clf_result["class_name"], clf_result["confidence"] * 100)
 
-    if skipped:
-        mask = np.zeros((224, 224), dtype=np.float32)
-        seg_overlay = np.zeros((224, 224, 3), dtype=np.uint8)
-        tumor_stats = {
-            "tumor_area_pct": 0.0,
-            "tumor_pixels": 0,
-            "total_pixels": int(mask.size),
-            "has_mask": False,
-        }
-    else:
-        segmentor_module = _get_segmentor_module()
-        mask = segmentor_module.segment(segmentor_model, img_rgb, segmentor_device)
-        seg_overlay = segmentor_module.get_segmentation_overlay(img_rgb, mask)
-        tumor_stats = segmentor_module.compute_tumor_stats(mask)
+        heatmap_rgb, gradcam_overlay = classifier_module.get_gradcam_overlay(
+            classifier_model,
+            img_rgb,
+            pred_index=clf_result["class_idx"],
+        )
 
-    report = generate_clinical_report(
-        class_name=clf_result["class_name"],
-        confidence=clf_result["confidence"],
-        probabilities=clf_result["probabilities"],
-        tumor_area_pct=tumor_stats["tumor_area_pct"],
-        has_mask=tumor_stats["has_mask"],
-        language=language,
-    )
+        segmentor_model, segmentor_device = _ensure_segmentor_loaded()
+        skipped = not clf_result["has_tumor"] or segmentor_model is None
 
-    if ENABLE_RAG:
-        rag_result = _get_rag_module().generate_rag_report(
+        if skipped:
+            mask = np.zeros((224, 224), dtype=np.float32)
+            seg_overlay = np.zeros((224, 224, 3), dtype=np.uint8)
+            tumor_stats = {
+                "tumor_area_pct": 0.0,
+                "tumor_pixels": 0,
+                "total_pixels": int(mask.size),
+                "has_mask": False,
+            }
+        else:
+            segmentor_module = _get_segmentor_module()
+            mask = segmentor_module.segment(segmentor_model, img_rgb, segmentor_device)
+            seg_overlay = segmentor_module.get_segmentation_overlay(img_rgb, mask)
+            tumor_stats = segmentor_module.compute_tumor_stats(mask)
+
+        report = generate_clinical_report(
             class_name=clf_result["class_name"],
             confidence=clf_result["confidence"],
+            probabilities=clf_result["probabilities"],
             tumor_area_pct=tumor_stats["tumor_area_pct"],
             has_mask=tumor_stats["has_mask"],
-            probabilities=clf_result["probabilities"],
             language=language,
         )
-    else:
-        rag_result = {
-            "llm_report": "RAG reporting is disabled in this deployment.",
-            "source": "disabled",
-            "retrieved_docs": [],
-            "language": language,
+
+        if patient_id:
+            report["patient_id"] = patient_id
+
+        if ENABLE_RAG:
+            rag_result = _get_rag_module().generate_rag_report(
+                class_name=clf_result["class_name"],
+                confidence=clf_result["confidence"],
+                tumor_area_pct=tumor_stats["tumor_area_pct"],
+                has_mask=tumor_stats["has_mask"],
+                probabilities=clf_result["probabilities"],
+                language=language,
+            )
+        else:
+            rag_result = {
+                "llm_report": "RAG reporting is disabled in this deployment.",
+                "source": "disabled",
+                "retrieved_docs": [],
+                "language": language,
+            }
+
+        inference_time = round((time.time() - t0) * 1000, 1)
+        log.info("Total inference time: %s ms", inference_time)
+
+        img_224 = cv2.resize(img_rgb, (224, 224))
+        images = {
+            "original": ndarray_to_base64(img_224),
+            "gradcam_heatmap": ndarray_to_base64(heatmap_rgb),
+            "gradcam_overlay": ndarray_to_base64(gradcam_overlay),
+            "seg_mask": mask_to_base64(mask),
+            "seg_overlay": ndarray_to_base64(seg_overlay),
         }
 
-    inference_time = round((time.time() - t0) * 1000, 1)
-    log.info("Total inference time: %s ms", inference_time)
-
-    img_224 = cv2.resize(img_rgb, (224, 224))
-    images = {
-        "original": ndarray_to_base64(img_224),
-        "gradcam_heatmap": ndarray_to_base64(heatmap_rgb),
-        "gradcam_overlay": ndarray_to_base64(gradcam_overlay),
-        "seg_mask": mask_to_base64(mask),
-        "seg_overlay": ndarray_to_base64(seg_overlay),
-    }
-
-    return AnalysisResponse(
-        classification=ClassificationResult(**clf_result),
-        segmentation=SegmentationResult(
-            tumor_area_pct=tumor_stats["tumor_area_pct"],
-            tumor_pixels=tumor_stats["tumor_pixels"],
-            total_pixels=tumor_stats["total_pixels"],
-            has_mask=tumor_stats["has_mask"],
-            skipped=skipped,
-        ),
-        clinical_report=report,
-        rag_report=RAGResult(**rag_result),
-        images=images,
-        inference_time_ms=inference_time,
-    )
+        return AnalysisResponse(
+            classification=ClassificationResult(**clf_result),
+            segmentation=SegmentationResult(
+                tumor_area_pct=tumor_stats["tumor_area_pct"],
+                tumor_pixels=tumor_stats["tumor_pixels"],
+                total_pixels=tumor_stats["total_pixels"],
+                has_mask=tumor_stats["has_mask"],
+                skipped=skipped,
+            ),
+            clinical_report=report,
+            rag_report=RAGResult(**rag_result),
+            images=images,
+            inference_time_ms=inference_time,
+        )
+    finally:
+        if UNLOAD_CLASSIFIER_AFTER_REQUEST:
+            _unload_classifier()
